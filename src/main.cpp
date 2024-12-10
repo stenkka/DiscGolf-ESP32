@@ -64,6 +64,9 @@ comp_filter_t filteredMeasBuff[BUFFER_SIZE];
 unsigned long deltaTime[BUFFER_SIZE];
 
 float accX, accY, accZ;
+float accXError, accYError, accZError;
+float gyroX, gyroY, gyroZ;
+float gyroXError, gyroYError, gyroZError;
 uint16_t acc_x_raw, acc_y_raw, acc_z_raw;
 uint16_t gyro_x_raw, gyro_y_raw, gyro_z_raw;
 uint16_t acc_x_err, acc_y_err, acc_z_err;
@@ -121,6 +124,61 @@ uint16_t delta_time, current_time, previous_t;
       }
    }
 
+void calibrateSensor()
+{
+   float accXSum = 0;
+   float accYSum = 0;
+   float accZSum = 0;
+   float gyroXSum = 0;
+   float gyroYSum = 0;
+   float gyroZSum = 0;
+
+   uint16_t numOfSamples = 200;
+
+   for (int i = 0;i<numOfSamples;i++)
+   {
+      // ACCELEROMETER
+      I2CMPU.beginTransmission(MPU_ADDR);
+      I2CMPU.write(0x3B); // Start with register 0x3B (ACCEL_XOUT_H)
+      I2CMPU.endTransmission(false);
+      I2CMPU.requestFrom(MPU_ADDR, 6, true); // Read 6 registers total, each axis value is stored in 2 registers
+      //For a range of +-8g, we need to divide the raw values by 4096
+      accX = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+      accY = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+      accZ = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+
+      accZ -= 1; // eliminate error due to gravitation
+
+      accXSum += accX;
+      accYSum += accY;
+      accZSum += accZ;
+
+      float accMagnitude = sqrt(pow(accX, 2) + pow(accY, 2) + pow(accZ, 2));
+
+      // GYROSCOPE
+      I2CMPU.beginTransmission(MPU_ADDR);
+      I2CMPU.write(0x43); // Start with register 0x43 (GYRO_XOUT_H)
+      I2CMPU.endTransmission(false);
+      I2CMPU.requestFrom(MPU_ADDR, 6, true); // Read 6 registers total, each axis value is stored in 2 registers
+      //For a range of +-8g, we need to divide the raw values by 4096
+      gyroX = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+      gyroY = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+      gyroZ = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+
+      gyroXSum += gyroX;
+      gyroYSum += gyroY;
+      gyroZSum += gyroZ;
+   }
+   accXError = accXSum / numOfSamples;
+   accYError = accYSum / numOfSamples;
+   accZError = accZSum / numOfSamples;
+
+   gyroXError = gyroXSum / numOfSamples;
+   gyroYError = gyroYSum / numOfSamples;
+   gyroZError = gyroZSum / numOfSamples;
+
+   Serial.print("Calibration completed.\n");
+}
 
 void setup() {
    Serial.begin(115200);
@@ -179,6 +237,8 @@ void setup() {
    delay(1000);
 
    mqttClient.setServer(MQTT_SERVER, 1883);
+
+   calibrateSensor();
 }
 
 void loop() {
@@ -191,18 +251,19 @@ void loop() {
 
    char accPrint[256] = "";
 
-   Serial.print(isTriggerPressed);
+   //Serial.print(isTriggerPressed);
 
    if (isTriggerPressed)
    {
+      // ACCELEROMETER
       I2CMPU.beginTransmission(MPU_ADDR);
       I2CMPU.write(0x3B); // Start with register 0x3B (ACCEL_XOUT_H)
       I2CMPU.endTransmission(false);
       I2CMPU.requestFrom(MPU_ADDR, 6, true); // Read 6 registers total, each axis value is stored in 2 registers
       //For a range of +-8g, we need to divide the raw values by 4096
-      accX = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
-      accY = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
-      accZ = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0);
+      accX = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - accXError;
+      accY = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - accYError;
+      accZ = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - accZError;
 
       accZ -= 1; // eliminate error due to gravitation
 
@@ -210,17 +271,28 @@ void loop() {
 
       sprintf(accPrint, "%f,%f,%f,%f\n", accX, accY, accZ, accMagnitude);
       //Serial.print(accPrint);
-   }
-   
-   if (!mqttClient.connected()) {
-      Serial.print("MQTT not connected, reconnecting...\n");
-      if(mqttClient.connect("mac")) Serial.print("MQTT connected.\n");
-   }
 
-   mqttClient.publish("sensors/acc", accPrint);
+      // GYROSCOPE
+      I2CMPU.beginTransmission(MPU_ADDR);
+      I2CMPU.write(0x43); // Start with register 0x43 (GYRO_XOUT_H)
+      I2CMPU.endTransmission(false);
+      I2CMPU.requestFrom(MPU_ADDR, 6, true); // Read 6 registers total, each axis value is stored in 2 registers
+      //For a range of +-8g, we need to divide the raw values by 4096
+      gyroX = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - gyroXError;
+      gyroY = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - gyroYError;
+      gyroZ = (int16_t)((I2CMPU.read() << 8) | I2CMPU.read()) / (4096.0) - gyroZError;
+
+      if (!mqttClient.connected()) {
+         Serial.print("MQTT not connected, reconnecting...\n");
+         if(mqttClient.connect("mac")) Serial.print("MQTT connected.\n");
+      }
+
+      mqttClient.publish("sensors/acc", accPrint);
    
-   mqttClient.loop();
+      mqttClient.loop();
+   }
    
+
    delay(100);
 
    //ledcWrite(pwmChannelBuzzer, dutyCycleBuzzer); buzzer toimii
