@@ -11,6 +11,7 @@
 
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <Adafruit_DRV2605.h>
 #include <Wire.h>
 
 // esp32 softAP credentials
@@ -27,6 +28,8 @@
 TwoWire I2CMPU = TwoWire(0);
 Adafruit_MPU6050 mpu;
 
+TwoWire I2CDRV = TwoWire(1);
+Adafruit_DRV2605 drv;
 
 // PWM
 
@@ -46,6 +49,21 @@ const int freqBuzzer = 500;
 const int pwmChannelBuzzer = 0;
 const int resolutionBuzzer = 8;
 int dutyCycleBuzzer = 100;
+
+// LEDs
+int ledGreen = 38;
+int ledYellow = 48;
+int ledRed = 47;
+
+int ledPower0 = 15;
+int ledPower1 = 16;
+int ledPower2 = 17;
+int ledPower3 = 18;
+
+int pinVoltage = 4;
+int voltage = 0;
+
+bool lastTriggerState = false;
 
 // WiFi and MQTT
 
@@ -103,7 +121,7 @@ uint16_t delta_time, current_time, previous_t;
 
          deltaTime[i] = millis() - elapsedTime;
          elapsedTime = millis();
-         
+
       }
 
    }
@@ -195,15 +213,28 @@ void setup() {
   }
   Serial.print("MPU6050 Found!");
 
+
+   Serial.println("DRV2605 test");
+   I2CDRV.begin(13, 14, 100000);
+
+   // Try to initialize DRV
+   if (!drv.begin(&I2CDRV)) {
+      Serial.print("Could not find DRV2605");
+      while (1) {
+         delay(10);
+      }
+   }
+   Serial.println("DRV2605 found");
+
   Serial.print("Configuring acc and gyro");
 
-   
+
    I2CMPU.beginTransmission(MPU_ADDR);       // Start communication with MPU6050
    I2CMPU.write(0x6B);                  // Talk to the register 6B
    I2CMPU.write(0x00);                  // Make reset - place a 0 into the 6B register
    I2CMPU.endTransmission(true);        //end the transmission
-   
-  
+
+
    // Configure Accelerometer Sensitivity - Full Scale Range (default +/- 2g)
    I2CMPU.beginTransmission(MPU_ADDR);
    I2CMPU.write(0x1C);                  //Talk to the ACCEL_CONFIG register (1C hex)
@@ -215,14 +246,17 @@ void setup() {
    I2CMPU.write(0x10);                   // Set the register bits as 00010000 (1000deg/s full scale)
    I2CMPU.endTransmission(true);
    delay(20);
-  
+
+
+   drv.selectLibrary(1);
+   drv.setMode(DRV2605_MODE_INTTRIG);
 
    // GPIO setup
-   
+
    // Motor
    //ledcSetup(pwmChannelMotor, freqMotor, resolutionMotor);
    //ledcAttachPin(pinMotor, pwmChannelMotor);
-   
+
 
    // Buzzer
    //ledcSetup(pwmChannelBuzzer, freqBuzzer, resolutionBuzzer);
@@ -230,6 +264,32 @@ void setup() {
 
    // Trigger
    pinMode(21, INPUT);
+
+   // Push buttons
+   pinMode(1, INPUT);
+   pinMode(40, INPUT);
+
+   // LEDs
+   pinMode(ledGreen, OUTPUT);
+   pinMode(ledYellow, OUTPUT);
+   pinMode(ledRed, OUTPUT);
+
+   pinMode(ledPower0, OUTPUT);
+   pinMode(ledPower1, OUTPUT);
+   pinMode(ledPower2, OUTPUT);
+   pinMode(ledPower3, OUTPUT);
+
+   // Set all LEDs inital value to low
+   digitalWrite(ledGreen, LOW);
+   digitalWrite(ledYellow, LOW);
+   digitalWrite(ledRed, LOW);
+   digitalWrite(ledPower0, LOW);
+   digitalWrite(ledPower1, LOW);
+   digitalWrite(ledPower2, LOW);
+   digitalWrite(ledPower3, LOW);
+
+   // Voltage measurement
+   pinMode(pinVoltage, INPUT);
 
    Serial.print("Setting AP (Access Point)…");
    WiFi.softAP(ESP_SSID, ESP_PASS);
@@ -244,7 +304,11 @@ void setup() {
 void loop() {
    // Read accelerometer data if trigger is pressed down
    bool isTriggerPressed = !digitalRead(21); // pin outputs 0 when pressed down
-   
+
+   // Push buttons
+   bool isDebugPressed = !digitalRead(1);
+   bool isCalibPressed = !digitalRead(40);
+
    accX = 0;
    accY = 0;
    accZ = 0;
@@ -255,6 +319,8 @@ void loop() {
 
    if (isTriggerPressed)
    {
+      lastTriggerState = true;
+      digitalWrite(ledYellow, HIGH);
       // ACCELEROMETER
       I2CMPU.beginTransmission(MPU_ADDR);
       I2CMPU.write(0x3B); // Start with register 0x3B (ACCEL_XOUT_H)
@@ -288,13 +354,60 @@ void loop() {
       }
 
       mqttClient.publish("sensors/acc", accPrint);
-   
+
       mqttClient.loop();
+   } else if (lastTriggerState && !isTriggerPressed) { // After trigger is released vibrate the moter and set yellow led low
+      lastTriggerState = false;
+
+      drv.setWaveform(0, 90);
+      drv.setWaveform(1, 0);
+      drv.go();
+
+      digitalWrite(ledYellow, LOW);
+   } else {
+      digitalWrite(ledYellow, LOW);
    }
-   
+
 
    delay(100);
 
    //ledcWrite(pwmChannelBuzzer, dutyCycleBuzzer); buzzer toimii
+
+   // Voltage measurement if calibration button is pressed
+   if (isCalibPressed)
+   {
+      voltage = analogRead(pinVoltage);
+      Serial.println(voltage);
+      // 75-100%
+      if (voltage > 3313) {
+         digitalWrite(ledPower0, HIGH);
+         digitalWrite(ledPower1, HIGH);
+         digitalWrite(ledPower2, HIGH);
+         digitalWrite(ledPower3, HIGH);
+      // 50-75%
+      } else if (voltage > 2904) {
+         digitalWrite(ledPower0, HIGH);
+         digitalWrite(ledPower1, HIGH);
+         digitalWrite(ledPower2, HIGH);
+         digitalWrite(ledPower3, LOW);
+      // 25-50%
+      } else if (voltage > 2495) {
+         digitalWrite(ledPower0, HIGH);
+         digitalWrite(ledPower1, HIGH);
+         digitalWrite(ledPower2, LOW);
+         digitalWrite(ledPower3, LOW);
+      // 0-25%
+      } else {
+         digitalWrite(ledPower0, HIGH);
+         digitalWrite(ledPower1, LOW);
+         digitalWrite(ledPower2, LOW);
+         digitalWrite(ledPower3, LOW);
+      }
+   } else {
+         digitalWrite(ledPower0, LOW);
+         digitalWrite(ledPower1, LOW);
+         digitalWrite(ledPower2, LOW);
+         digitalWrite(ledPower3, LOW);
+   }
 
 }
